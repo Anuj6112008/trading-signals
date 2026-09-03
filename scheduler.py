@@ -27,8 +27,19 @@ def get_now_ist() -> datetime:
     return datetime.now(IST)
 
 
+def normalize_time_str(time_str: str) -> str:
+    """Ensures time is always formatted with leading zeros (e.g. '1:48' -> '01:48')."""
+    try:
+        parts = time_str.strip().split(":")
+        h = int(parts[0])
+        m = int(parts[1])
+        return f"{h:02d}:{m:02d}"
+    except Exception:
+        return time_str.strip()
+
+
 def to_bold_font(text: str) -> str:
-    """Converts regular text to Mathematical Bold Unicode font (e.g., USD/JPY -> 𝐔𝐒𝐃/𝐉𝐏𝐘)."""
+    """Converts regular text to Mathematical Bold Unicode font."""
     result = []
     for char in text:
         if 'A' <= char <= 'Z':
@@ -85,7 +96,6 @@ def _execute_single_trade(trade_number: int, total_trades: int) -> None:
     # -------------------------------------------------------------
     # 1. SEND 'NEXT ONE' STICKER EXACT 30 SECONDS BEFORE PRE-ALERT
     # -------------------------------------------------------------
-    # Wait until :15s mark of the minute (30s before :45s pre-alert)
     while get_now_ist().second != 15:
         time.sleep(0.5)
 
@@ -110,7 +120,6 @@ def _execute_single_trade(trade_number: int, total_trades: int) -> None:
     sent_time = now.strftime("%H:%M:45")
     entry_target_time = (now + timedelta(seconds=15)).strftime("%H:%M:00")
     
-    # Styled text formatting
     bold_pair = to_bold_font(pair_meta['display'])
 
     pre_alert_text = (
@@ -165,17 +174,17 @@ def run_session(total_trades: int) -> None:
     _broadcast_sticker(MSG_ID_START_STICKER)
     time.sleep(5)
 
-    # 2. Execute trades with 3-minute intervals
+    # 2. Execute trades sequentially with 3-minute intervals
     for trade_idx in range(1, total_trades + 1):
         if _stop_event.is_set():
             break
         
         _execute_single_trade(trade_idx, total_trades)
 
-        # 3-Minute gap before initiating next trade (if not last trade)
+        # Wait 3 minutes before next trade
         if trade_idx < total_trades:
             print(f"⏳ Waiting 3 minutes before Trade #{trade_idx + 1}...")
-            time.sleep(120)  # Wait 2 mins, then alignment loop in _execute_single_trade takes over
+            time.sleep(110)
 
     # 3. Session End: Send Closing Sticker (WebDealx/414)
     print(f"\n🏁 [SESSION ENDED] Sending closing sticker ({MSG_ID_END_STICKER}) and review message...")
@@ -191,52 +200,55 @@ def run_session(total_trades: int) -> None:
 
 def _scheduler_worker() -> None:
     """Main automated schedule monitor checking 10m, 5m, and session start events."""
-    last_10m_sent_date_time = ""
+    last_10m_sent_events = set()
     last_5m_sticker_ids: Dict[str, int] = {}
-    last_5m_sent_date_time = ""
+    last_5m_sent_events = set()
+    last_started_sessions = set()
 
     print("⏰ [SCHEDULER RUNNING] Monitoring configured session timings 24/7...")
 
     while not _stop_event.is_set():
         if not get_setting("is_bot_active", True) or _is_session_running:
-            time.sleep(5)
+            time.sleep(3)
             continue
 
         now = get_now_ist()
-        current_time_str = now.strftime("%H:%M")
         current_date_str = now.strftime("%Y-%m-%d")
 
-        session_timings = get_setting("session_timings", ["14:00", "19:00"])
+        raw_timings = get_setting("session_timings", ["14:00", "19:00"])
         trades_per_session = int(get_setting("trades_per_session", 5))
         login_link = get_setting("login_link")
 
-        for s_time in session_timings:
+        for raw_time in raw_timings:
             try:
+                s_time = normalize_time_str(raw_time)
                 s_hour, s_minute = map(int, s_time.split(":"))
                 session_dt = now.replace(hour=s_hour, minute=s_minute, second=0, microsecond=0)
                 diff_seconds = (session_dt - now).total_seconds()
 
+                event_key_10m = f"{current_date_str}_{s_time}_10m"
+                event_key_5m = f"{current_date_str}_{s_time}_5m"
+                event_key_start = f"{current_date_str}_{s_time}_start"
+
                 # -------------------------------------------------------------
                 # EVENT 1: T-10 MINUTES BEFORE (Post Login Link)
                 # -------------------------------------------------------------
-                if 570 <= diff_seconds <= 630:
-                    event_key = f"{current_date_str}_{s_time}_10m"
-                    if last_10m_sent_date_time != event_key:
+                if 540 <= diff_seconds <= 630:
+                    if event_key_10m not in last_10m_sent_events:
                         link_text = (
                             f"🔔 **SESSION STARTING IN 10 MINUTES!** 🔔\n\n"
                             f"Make sure you are logged in and your account is ready.\n\n"
                             f"🔗 **Broker Login / Registration Link:**\n👉 {login_link}"
                         )
                         _broadcast_text(link_text)
-                        last_10m_sent_date_time = event_key
+                        last_10m_sent_events.add(event_key_10m)
                         print(f"[{now.strftime('%I:%M:%S %p IST')}] 🔗 Posted 10-Min Login Link for {s_time} session.")
 
                 # -------------------------------------------------------------
                 # EVENT 2: T-5 MINUTES BEFORE (Send 410 Sticker)
                 # -------------------------------------------------------------
-                if 270 <= diff_seconds <= 330:
-                    event_key = f"{current_date_str}_{s_time}_5m"
-                    if last_5m_sent_date_time != event_key:
+                if 240 <= diff_seconds <= 330:
+                    if event_key_5m not in last_5m_sent_events:
                         channels = get_channels()
                         last_5m_sticker_ids.clear()
                         for ch in channels:
@@ -245,32 +257,35 @@ def _scheduler_worker() -> None:
                                 last_5m_sticker_ids[ch] = sent.message_id
                             except Exception:
                                 pass
-                        last_5m_sent_date_time = event_key
+                        last_5m_sent_events.add(event_key_5m)
                         print(f"[{now.strftime('%I:%M:%S %p IST')}] ⏳ Posted 5-Min Sticker ({MSG_ID_5MIN_STICKER}) for {s_time} session.")
 
                 # -------------------------------------------------------------
                 # EVENT 3: SESSION START (Delete 410 Sticker & Start Session)
                 # -------------------------------------------------------------
-                if -15 <= diff_seconds <= 30 and current_time_str == s_time:
-                    # Delete 5m sticker across channels
-                    if last_5m_sticker_ids:
-                        _delete_message_across_channels(last_5m_sticker_ids)
-                        last_5m_sticker_ids.clear()
+                if -20 <= diff_seconds <= 20:
+                    if event_key_start not in last_started_sessions:
+                        last_started_sessions.add(event_key_start)
 
-                    # Launch Session in dedicated thread
-                    t = threading.Thread(
-                        target=run_session,
-                        args=(trades_per_session,),
-                        daemon=True,
-                        name=f"SessionThread_{s_time}"
-                    )
-                    t.start()
-                    break
+                        # Delete 5m sticker across channels
+                        if last_5m_sticker_ids:
+                            _delete_message_across_channels(last_5m_sticker_ids)
+                            last_5m_sticker_ids.clear()
+
+                        # Launch Session in dedicated thread
+                        t = threading.Thread(
+                            target=run_session,
+                            args=(trades_per_session,),
+                            daemon=True,
+                            name=f"SessionThread_{s_time}"
+                        )
+                        t.start()
+                        break
 
             except Exception as e:
-                print(f"❌ Scheduler check error for {s_time}: {e}")
+                print(f"❌ Scheduler check error for {raw_time}: {e}")
 
-        time.sleep(5)
+        time.sleep(2)
 
 
 def start_scheduler() -> None:
