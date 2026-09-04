@@ -3,7 +3,16 @@ import threading
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any
 import telebot
-from config import BOT_TOKEN, IST, TARGET_ASSETS
+from config import (
+    BOT_TOKEN, 
+    IST, 
+    ALL_OTC_PAIRS,
+    STICKER_SOURCE_CHANNEL,
+    MSG_ID_5MIN_STICKER,
+    MSG_ID_START_STICKER,
+    MSG_ID_END_STICKER,
+    MSG_ID_NEXT_TRADE_STICKER
+)
 from database import get_setting, get_channels
 from strategy import find_next_trading_opportunity
 
@@ -13,13 +22,6 @@ bot = telebot.TeleBot(BOT_TOKEN)
 _scheduler_thread: Optional[threading.Thread] = None
 _stop_event = threading.Event()
 _is_session_running: bool = False
-
-# Sticker Channel & IDs
-STICKER_SOURCE_CHANNEL = "@WebDealx"
-MSG_ID_5MIN_STICKER = 410
-MSG_ID_START_STICKER = 411
-MSG_ID_END_STICKER = 414
-MSG_ID_NEXT_TRADE_STICKER = 416
 
 
 def get_now_ist() -> datetime:
@@ -39,7 +41,7 @@ def normalize_time_str(time_str: str) -> str:
 
 
 def to_bold_font(text: str) -> str:
-    """Converts regular text to Mathematical Bold Unicode font."""
+    """Converts regular text to Mathematical Bold Unicode font (e.g. USD/JPY -> 𝐔𝐒𝐃/𝐉𝐏𝐘)."""
     result = []
     for char in text:
         if 'A' <= char <= 'Z':
@@ -76,52 +78,39 @@ def _broadcast_text(text: str) -> None:
             print(f"❌ Error sending message to {ch}: {e}")
 
 
-def _delete_message_across_channels(msg_ids: Dict[str, int]) -> None:
-    """Deletes sent messages/stickers across channels."""
-    for ch, m_id in msg_ids.items():
-        try:
-            bot.delete_message(chat_id=ch, message_id=m_id)
-        except Exception:
-            pass
-
-
 def _execute_single_trade(trade_number: int, total_trades: int) -> None:
     """
     Executes a single trade cycle:
-    1. Sends 'NEXT ONE' Sticker 30 seconds before trade (WITHOUT DELETING).
-    2. Sends T-15 Pre-Alert at :45s.
-    3. Waits exact 15 seconds.
-    4. Sends Confirmed Direction Alert at :00s.
+    - Trade #1: Directly starts without Next One sticker.
+    - Trade #2+: Sends 'NEXT ONE' sticker at :15s (30s before pre-alert) without deleting it.
+    - Pre-Alert at :45s -> 15s gap -> Direction Alert at :00s.
     """
-    # -------------------------------------------------------------
-    # 1. SEND 'NEXT ONE' STICKER EXACT 30 SECONDS BEFORE PRE-ALERT
-    # -------------------------------------------------------------
-    while get_now_ist().second != 15:
-        time.sleep(0.5)
+    # Send 'NEXT ONE' sticker starting from Trade #2 onwards
+    if trade_number > 1:
+        while get_now_ist().second != 15:
+            time.sleep(0.5)
 
-    print(f"\n[{get_now_ist().strftime('%I:%M:%S %p IST')}] 🖼️ Sending 'NEXT ONE' Sticker 30s before trade #{trade_number} (No Deletion)...")
-    _broadcast_sticker(MSG_ID_NEXT_TRADE_STICKER)
+        print(f"\n[{get_now_ist().strftime('%I:%M:%S %p IST')}] 🖼️ Sending 'NEXT ONE' Sticker before Trade #{trade_number}...")
+        _broadcast_sticker(MSG_ID_NEXT_TRADE_STICKER)
 
-    # Wait 30 seconds to reach :45s mark
+    # Align to :45s mark for Pre-Alert
     while get_now_ist().second != 45:
         time.sleep(0.5)
 
-    # -------------------------------------------------------------
-    # 2. FIND BEST PAIR & DISPATCH MESSAGE 1 (PRE-ALERT AT :45s)
-    # -------------------------------------------------------------
+    # Find candidate from Admin-Selected pairs
     opportunity = find_next_trading_opportunity()
     if not opportunity:
-        pair_meta = TARGET_ASSETS[0]
-        direction, lead, price = "CALL", "Market Momentum", 1.08250
+        pair_meta = ALL_OTC_PAIRS[0]
+        direction, lead, price = "CALL", "Market Flow", 1.08250
     else:
         pair_meta, direction, lead, price = opportunity
 
     now = get_now_ist()
     sent_time = now.strftime("%H:%M:45")
     entry_target_time = (now + timedelta(seconds=15)).strftime("%H:%M:00")
-    
     bold_pair = to_bold_font(pair_meta['display'])
 
+    # MESSAGE 1: PRE-ALERT (Sent at :45s)
     pre_alert_text = (
         "⏳ GET READY -UPCOMING SIGNAL ⏳\n\n"
         f"🔹 Pair: {bold_pair}\n"
@@ -130,18 +119,13 @@ def _execute_single_trade(trade_number: int, total_trades: int) -> None:
         f"⏰ Entry Target: {entry_target_time} IST (In 15s)\n\n"
         "⚠️ 𝘽𝙚 𝙧𝙚𝙖𝙙𝙮 𝙬𝙞𝙩𝙝 𝙩𝙝𝙚  𝙥𝙖𝙞𝙧 & 𝙨𝙚𝙩 𝙞𝙣𝙫𝙚𝙨𝙩𝙢𝙚𝙣𝙩! 𝘿𝙞𝙧𝙚𝙘𝙩𝙞𝙤𝙣 𝙘𝙤𝙢𝙞𝙣𝙜….."
     )
-
     _broadcast_text(pre_alert_text)
-    print(f"📢 [MESSAGE 1 PRE-ALERT] {sent_time} -> {pair_meta['display']} | Target: {entry_target_time}")
+    print(f"📢 [TRADE #{trade_number} PRE-ALERT] {sent_time} -> {pair_meta['display']} | Target: {entry_target_time}")
 
-    # -------------------------------------------------------------
-    # 3. WAIT EXACT 15 SECONDS (Reaches :00s Candle Open)
-    # -------------------------------------------------------------
+    # Wait exact 15 seconds to reach :00s candle open
     time.sleep(15)
 
-    # -------------------------------------------------------------
-    # 4. DISPATCH MESSAGE 2 (CONFIRMED DIRECTION AT :00s)
-    # -------------------------------------------------------------
+    # MESSAGE 2: CONFIRMED DIRECTION (Sent at :00s)
     entry_now_time = get_now_ist().strftime("%H:%M:00")
 
     if direction == "CALL":
@@ -157,9 +141,8 @@ def _execute_single_trade(trade_number: int, total_trades: int) -> None:
         "⏱️ Expiry: 1 Minute\n\n"
         "👉 ALWAYS ENTER IN FRESH CANDLE"
     )
-
     _broadcast_text(entry_text)
-    print(f"🚀 [MESSAGE 2 DIRECTION] {entry_now_time} -> {pair_meta['display']} | {direction}")
+    print(f"🚀 [TRADE #{trade_number} DIRECTION] {entry_now_time} -> {pair_meta['display']} | {direction}")
 
 
 def run_session(total_trades: int) -> None:
@@ -174,26 +157,42 @@ def run_session(total_trades: int) -> None:
     _broadcast_sticker(MSG_ID_START_STICKER)
     time.sleep(5)
 
-    # 2. Execute trades sequentially with 3-minute intervals
+    # 2. Execute trades with 3-minute intervals
     for trade_idx in range(1, total_trades + 1):
         if _stop_event.is_set():
             break
         
         _execute_single_trade(trade_idx, total_trades)
 
-        # Wait 3 minutes before next trade
         if trade_idx < total_trades:
             print(f"⏳ Waiting 3 minutes before Trade #{trade_idx + 1}...")
             time.sleep(110)
 
-    # 3. Session End: Send Closing Sticker (WebDealx/414)
-    print(f"\n🏁 [SESSION ENDED] Sending closing sticker ({MSG_ID_END_STICKER}) and review message...")
-    _broadcast_sticker(MSG_ID_END_STICKER)
-    time.sleep(3)
+    # 3. Session End: 3 Sequential Closing Messages (2-min gap) + Delayed 414 Sticker
+    print("\n🏁 [TRADES FINISHED] Starting Closing Messages Sequence (2-Min Gaps)...")
+    
+    msg_1 = get_setting("closing_msg_1", "Session completed!")
+    msg_2 = get_setting("closing_msg_2", "Thnx for attending the session\nKindly send your reviews/ testimonials on @traderskull")
+    msg_3 = get_setting("closing_msg_3", "See you in next session!")
 
-    # 4. Post Closing Message
-    closing_msg = get_setting("closing_message", "Thnx for attending the session\nKindly send your reviews/ testimonials on @traderskull")
-    _broadcast_text(closing_msg)
+    # Message 1
+    _broadcast_text(msg_1)
+    print(f"[{get_now_ist().strftime('%I:%M:%S %p IST')}] ✍️ Closing Message 1 sent. Waiting 2 mins...")
+    time.sleep(120)
+
+    # Message 2
+    _broadcast_text(msg_2)
+    print(f"[{get_now_ist().strftime('%I:%M:%S %p IST')}] ✍️ Closing Message 2 sent. Waiting 2 mins...")
+    time.sleep(120)
+
+    # Message 3
+    _broadcast_text(msg_3)
+    print(f"[{get_now_ist().strftime('%I:%M:%S %p IST')}] ✍️ Closing Message 3 sent. Waiting 2 mins...")
+    time.sleep(120)
+
+    # Session End Sticker (414) sent 2 mins after Message 3
+    print(f"[{get_now_ist().strftime('%I:%M:%S %p IST')}] 🏁 Sending Final End Sticker ({MSG_ID_END_STICKER})...")
+    _broadcast_sticker(MSG_ID_END_STICKER)
 
     _is_session_running = False
 
@@ -201,7 +200,6 @@ def run_session(total_trades: int) -> None:
 def _scheduler_worker() -> None:
     """Main automated schedule monitor checking 10m, 5m, and session start events."""
     last_10m_sent_events = set()
-    last_5m_sticker_ids: Dict[str, int] = {}
     last_5m_sent_events = set()
     last_started_sessions = set()
 
@@ -245,32 +243,20 @@ def _scheduler_worker() -> None:
                         print(f"[{now.strftime('%I:%M:%S %p IST')}] 🔗 Posted 10-Min Login Link for {s_time} session.")
 
                 # -------------------------------------------------------------
-                # EVENT 2: T-5 MINUTES BEFORE (Send 410 Sticker)
+                # EVENT 2: T-5 MINUTES BEFORE (Send 410 Sticker - NO DELETION)
                 # -------------------------------------------------------------
                 if 240 <= diff_seconds <= 330:
                     if event_key_5m not in last_5m_sent_events:
-                        channels = get_channels()
-                        last_5m_sticker_ids.clear()
-                        for ch in channels:
-                            try:
-                                sent = bot.copy_message(chat_id=ch, from_chat_id=STICKER_SOURCE_CHANNEL, message_id=MSG_ID_5MIN_STICKER)
-                                last_5m_sticker_ids[ch] = sent.message_id
-                            except Exception:
-                                pass
+                        _broadcast_sticker(MSG_ID_5MIN_STICKER)
                         last_5m_sent_events.add(event_key_5m)
                         print(f"[{now.strftime('%I:%M:%S %p IST')}] ⏳ Posted 5-Min Sticker ({MSG_ID_5MIN_STICKER}) for {s_time} session.")
 
                 # -------------------------------------------------------------
-                # EVENT 3: SESSION START (Delete 410 Sticker & Start Session)
+                # EVENT 3: SESSION START
                 # -------------------------------------------------------------
                 if -20 <= diff_seconds <= 20:
                     if event_key_start not in last_started_sessions:
                         last_started_sessions.add(event_key_start)
-
-                        # Delete 5m sticker across channels
-                        if last_5m_sticker_ids:
-                            _delete_message_across_channels(last_5m_sticker_ids)
-                            last_5m_sticker_ids.clear()
 
                         # Launch Session in dedicated thread
                         t = threading.Thread(
