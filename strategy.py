@@ -1,32 +1,36 @@
 from typing import Optional, Tuple, List, Dict, Any
 import pandas as pd
 from market_feed import get_asset_candles, get_latest_price
-from config import TARGET_ASSETS
+from config import ALL_OTC_PAIRS
+from database import get_selected_pairs, get_setting
 
-# Track last sent pair to enforce fair rotation across all 7 assets
+# Track last sent pair to enforce fair rotation
 _last_sent_symbol: str = ""
 _rotation_index: int = 0
 
 
 def evaluate_micro_direction(symbol: str) -> Tuple[Optional[str], Optional[str], float]:
     """
-    Evaluates candle buffer for directional bias on 1M timeframe:
-    - Symmetric 50/50 balance between BUY (CALL) and SELL (PUT)
-    - Returns: (Direction 'CALL'/'PUT'/None, Lead Signal Description, Current Price)
+    Evaluates candle buffer and applies the Reverse Strategy Inversion:
+    - Raw Bullish Indicator -> Inverted to 'PUT' (SELL)
+    - Raw Bearish Indicator -> Inverted to 'CALL' (BUY)
     """
     data = get_asset_candles(symbol)
     current_price = get_latest_price(symbol)
+    is_reverse = get_setting("reverse_strategy", True)
 
     if len(data) < 3:
         if current_price > 0:
-            return "CALL", f"Live Price Momentum [{current_price}]", current_price
+            raw_dir = "CALL"
+            final_dir = "PUT" if is_reverse else raw_dir
+            return final_dir, f"Momentum [{current_price}] (Inverted)", current_price
         return None, None, 0.0
 
     df = pd.DataFrame(data)
     for col in ['open', 'high', 'low', 'close']:
         df[col] = df[col].astype(float)
 
-    # Technical Indicators: EMA(5) & Fast RSI(7)
+    # Fast EMA & RSI Indicators
     df['ema5'] = df['close'].ewm(span=5, adjust=False).mean()
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(5).mean()
@@ -37,39 +41,57 @@ def evaluate_micro_direction(symbol: str) -> Tuple[Optional[str], Optional[str],
     latest_price = float(c0['close'])
     rsi_val = float(c0['rsi']) if not pd.isna(c0['rsi']) else 50.0
 
-    # 🟢 SYMMETRIC BUY (CALL) SETUP: Green Candle + Bullish Bias
+    # 1. Raw Market Direction Evaluation
     if c0['close'] > c0['open'] and (c0['close'] >= c0['ema5'] or rsi_val >= 48):
-        lead = f"Bullish Flow + RSI [{round(rsi_val, 1)}]"
-        return "CALL", lead, latest_price
-
-    # 🔴 SYMMETRIC SELL (PUT) SETUP: Red Candle + Bearish Bias
+        raw_direction = "CALL"
+        lead_info = f"Bullish Flow + RSI [{round(rsi_val, 1)}]"
     elif c0['close'] < c0['open'] and (c0['close'] <= c0['ema5'] or rsi_val <= 52):
-        lead = f"Bearish Flow + RSI [{round(rsi_val, 1)}]"
-        return "PUT", lead, latest_price
-
-    # Fallback Momentum Bias (If Doji / Equal Open-Close)
+        raw_direction = "PUT"
+        lead_info = f"Bearish Flow + RSI [{round(rsi_val, 1)}]"
     elif rsi_val >= 50:
-        return "CALL", f"RSI Bullish [{round(rsi_val, 1)}]", latest_price
+        raw_direction = "CALL"
+        lead_info = f"RSI Bullish [{round(rsi_val, 1)}]"
     else:
-        return "PUT", f"RSI Bearish [{round(rsi_val, 1)}]", latest_price
+        raw_direction = "PUT"
+        lead_info = f"RSI Bearish [{round(rsi_val, 1)}]"
+
+    # 2. Apply Reverse Strategy Inversion
+    if is_reverse:
+        final_direction = "PUT" if raw_direction == "CALL" else "CALL"
+        lead_text = f"{lead_info} (Reverse: {raw_direction} -> {final_direction})"
+    else:
+        final_direction = raw_direction
+        lead_text = lead_info
+
+    return final_direction, lead_text, latest_price
 
 
 def find_next_trading_opportunity() -> Optional[Tuple[Dict[str, Any], str, str, float]]:
     """
-    Scans the watchlist in round-robin rotated order to ensure no single pair repeats.
-    Returns: (pair_metadata, direction, lead_signal, entry_price) or None
+    Filters watchlist to ONLY Admin-Selected pairs and rotates fairly among them.
+    Returns: (pair_metadata, final_inverted_direction, lead_signal, entry_price) or None
     """
     global _last_sent_symbol, _rotation_index
 
-    # Rotate starting position so all 7 pairs get equal priority
-    rotated_watchlist = TARGET_ASSETS[_rotation_index:] + TARGET_ASSETS[:_rotation_index]
-    _rotation_index = (_rotation_index + 1) % len(TARGET_ASSETS)
+    # 1. Get Selected Pairs from Admin Database
+    selected_symbols = get_selected_pairs()
+    active_watchlist = [item for item in ALL_OTC_PAIRS if item["symbol"] in selected_symbols]
 
-    for item in rotated_watchlist:
+    if not active_watchlist:
+        active_watchlist = ALL_OTC_PAIRS[:5]  # Safe fallback
+
+    # 2. Fair Rotation across Selected Pairs
+    if _rotation_index >= len(active_watchlist):
+        _rotation_index = 0
+
+    rotated_list = active_watchlist[_rotation_index:] + active_watchlist[:_rotation_index]
+    _rotation_index = (_rotation_index + 1) % len(active_watchlist)
+
+    for item in rotated_list:
         sym = item["symbol"]
 
-        # Prevent immediate consecutive signal on the same pair
-        if sym == _last_sent_symbol and len(TARGET_ASSETS) > 1:
+        # Prevent immediate repetition if multiple pairs are selected
+        if sym == _last_sent_symbol and len(active_watchlist) > 1:
             continue
 
         direction, lead, entry_price = evaluate_micro_direction(sym)
