@@ -1,13 +1,31 @@
+import math
+from typing import Any, Dict, List
+
 import telebot
 from telebot import types
-from typing import Dict, Any, List
-from config import BOT_TOKEN, ADMIN_IDS
-from database import get_all_settings, update_setting, get_channels, add_channel, remove_channel
+
+from config import BOT_TOKEN, ADMIN_IDS, ALL_OTC_PAIRS
+from database import (
+    get_all_settings,
+    update_setting,
+    get_channels,
+    add_channel,
+    remove_channel,
+    get_selected_pairs,
+    toggle_pair_selection,
+    is_pair_selected,
+)
 from scheduler import run_session, is_session_active
 import threading
 
 # Admin state memory for multi-step text inputs
 _user_states: Dict[int, str] = {}
+
+# Tracks each admin's current position inside the Pair Selector
+# {"mode": "list" | "search", "page": int, "query": str}
+_pair_nav_state: Dict[int, Dict[str, Any]] = {}
+
+PAIRS_PER_PAGE = 10  # 5 rows x 2 pairs, matches the [pair][pair] x5 layout
 
 
 def is_admin(user_id: int) -> bool:
@@ -27,20 +45,22 @@ def get_cancel_keyboard() -> types.InlineKeyboardMarkup:
 def get_admin_menu_keyboard() -> types.InlineKeyboardMarkup:
     """Generates the main interactive admin dashboard keyboard."""
     markup = types.InlineKeyboardMarkup(row_width=2)
-    
+
     btn_channel_mgr = types.InlineKeyboardButton("📢 Channel Manager", callback_data="mgr_channels")
+    btn_pairs = types.InlineKeyboardButton("💱 Select Pairs", callback_data="mgr_pairs")
     btn_sessions = types.InlineKeyboardButton("🔢 No. of Sessions", callback_data="set_sessions")
     btn_timings = types.InlineKeyboardButton("⏰ Session Timings", callback_data="set_timings")
     btn_trades = types.InlineKeyboardButton("🎯 Trades per Session", callback_data="set_trades")
     btn_link = types.InlineKeyboardButton("🔗 Broker Login Link", callback_data="set_link")
-    btn_msg = types.InlineKeyboardButton("✍️ Closing Message", callback_data="set_msg")
+    btn_msg = types.InlineKeyboardButton("✍️ Closing Messages", callback_data="set_msg")
+    btn_reverse = types.InlineKeyboardButton("🔄 Toggle Reverse Strategy", callback_data="toggle_reverse")
     btn_start_now = types.InlineKeyboardButton("🚀 Start Session NOW (Test)", callback_data="start_now")
     btn_refresh = types.InlineKeyboardButton("🔄 Refresh Dashboard", callback_data="refresh_panel")
 
-    markup.add(btn_channel_mgr)
+    markup.add(btn_channel_mgr, btn_pairs)
     markup.add(btn_sessions, btn_timings)
     markup.add(btn_trades, btn_link)
-    markup.add(btn_msg)
+    markup.add(btn_msg, btn_reverse)
     markup.add(btn_start_now)
     markup.add(btn_refresh)
     return markup
@@ -67,6 +87,122 @@ def get_remove_channels_keyboard() -> types.InlineKeyboardMarkup:
     return markup
 
 
+def get_closing_msg_keyboard() -> types.InlineKeyboardMarkup:
+    """Sub-menu to edit the 3 sequential closing messages."""
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(types.InlineKeyboardButton("✍️ Message 1", callback_data="set_msg_1"))
+    markup.add(types.InlineKeyboardButton("✍️ Message 2", callback_data="set_msg_2"))
+    markup.add(types.InlineKeyboardButton("✍️ Message 3", callback_data="set_msg_3"))
+    markup.add(types.InlineKeyboardButton("🔙 Back to Dashboard", callback_data="refresh_panel"))
+    return markup
+
+
+# ---------------------------------------------------------------------------
+# PAIR SELECTOR (Search + Pagination)
+# ---------------------------------------------------------------------------
+
+def _display_for_symbol(symbol: str) -> str:
+    for p in ALL_OTC_PAIRS:
+        if p["symbol"] == symbol:
+            return p["display"]
+    return symbol
+
+
+def _pair_label(pair: Dict[str, Any]) -> str:
+    mark = "✅" if is_pair_selected(pair["symbol"]) else "⬜"
+    return f"{mark} {pair['display']}"
+
+
+def search_pairs(query: str) -> List[Dict[str, Any]]:
+    """Case-insensitive match on display name / symbol, ignoring spaces, '/' and 'OTC'."""
+    q = query.strip().lower().replace(" ", "").replace("/", "").replace("otc", "")
+    if not q:
+        return []
+    results = []
+    for pair in ALL_OTC_PAIRS:
+        norm_display = pair["display"].lower().replace(" ", "").replace("/", "").replace("(otc)", "").replace("otc", "")
+        norm_symbol = pair["symbol"].lower().replace("_otc", "")
+        if q in norm_display or q in norm_symbol:
+            results.append(pair)
+    return results
+
+
+def get_pairs_page_keyboard(chat_id: int, page: int) -> types.InlineKeyboardMarkup:
+    """[pair][pair] x5 rows -> [Search Pair] -> [Prev][Page][Next] -> [Back]"""
+    total_pages = max(1, math.ceil(len(ALL_OTC_PAIRS) / PAIRS_PER_PAGE))
+    page = max(0, min(page, total_pages - 1))
+    _pair_nav_state[chat_id] = {"mode": "list", "page": page, "query": ""}
+
+    start = page * PAIRS_PER_PAGE
+    page_pairs = ALL_OTC_PAIRS[start:start + PAIRS_PER_PAGE]
+
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    row: List[types.InlineKeyboardButton] = []
+    for pair in page_pairs:
+        row.append(types.InlineKeyboardButton(_pair_label(pair), callback_data=f"tp_{pair['symbol']}"))
+        if len(row) == 2:
+            markup.row(*row)
+            row = []
+    if row:
+        markup.row(*row)
+
+    markup.row(types.InlineKeyboardButton("🔍 Search Pair", callback_data="pairs_search"))
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(types.InlineKeyboardButton("⬅️ Prev", callback_data=f"pg_{page - 1}"))
+    nav_row.append(types.InlineKeyboardButton(f"📄 {page + 1}/{total_pages}", callback_data="noop"))
+    if page < total_pages - 1:
+        nav_row.append(types.InlineKeyboardButton("Next Page ➡️", callback_data=f"pg_{page + 1}"))
+    markup.row(*nav_row)
+
+    markup.row(types.InlineKeyboardButton("🔙 Back to Dashboard", callback_data="refresh_panel"))
+    return markup
+
+
+def get_pairs_search_results_keyboard(chat_id: int, query: str) -> types.InlineKeyboardMarkup:
+    _pair_nav_state[chat_id] = {"mode": "search", "page": 0, "query": query}
+    matches = search_pairs(query)
+
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    if not matches:
+        markup.row(types.InlineKeyboardButton("😕 No pair found — try again", callback_data="noop"))
+    else:
+        row = []
+        for pair in matches[:20]:
+            row.append(types.InlineKeyboardButton(_pair_label(pair), callback_data=f"tp_{pair['symbol']}"))
+            if len(row) == 2:
+                markup.row(*row)
+                row = []
+        if row:
+            markup.row(*row)
+
+    markup.row(types.InlineKeyboardButton("🔍 New Search", callback_data="pairs_search"))
+    markup.row(types.InlineKeyboardButton("🔙 Back to Pairs", callback_data="pairs_back_to_list"))
+    return markup
+
+
+def build_pairs_header_text(chat_id: int) -> str:
+    selected = get_selected_pairs()
+    nav = _pair_nav_state.get(chat_id, {"mode": "list", "page": 0, "query": ""})
+
+    if nav["mode"] == "search":
+        header = f"🔍 **Search Results for:** `{nav['query']}`\n\n"
+    else:
+        header = "💱 **SELECT SIGNAL PAIRS**\n\n"
+
+    selected_str = ", ".join(_display_for_symbol(s) for s in selected) if selected else "_None_"
+    return (
+        header
+        + f"✅ **Currently Selected ({len(selected)}):**\n{selected_str}\n\n"
+        + "Tap a pair below to select / deselect it (any number of pairs allowed)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# DASHBOARD STATUS TEXT
+# ---------------------------------------------------------------------------
+
 def build_status_text() -> str:
     """Formats the current bot configuration settings for the dashboard."""
     s = get_all_settings()
@@ -75,15 +211,24 @@ def build_status_text() -> str:
     timings_str = ", ".join(s.get("session_timings", []))
     session_status = "🟢 ACTIVE (Running)" if is_session_active() else "⚪ IDLE (Waiting for Schedule)"
 
+    selected = get_selected_pairs()
+    preview_syms = selected[:5]
+    pairs_preview = ", ".join(_display_for_symbol(sym) for sym in preview_syms)
+    if len(selected) > 5:
+        pairs_preview += f" +{len(selected) - 5} more"
+    reverse_on = bool(s.get("reverse_strategy", True))
+
     return (
         "⚙️ **POCKET OPTION VIP BOT — ADMIN DASHBOARD** ⚙️\n\n"
         f"📊 **Live Status:** {session_status}\n\n"
         f"📢 **Target Channels ({len(channels)}):**\n{channels_str}\n\n"
+        f"💱 **Selected Pairs ({len(selected)}):** {pairs_preview}\n"
+        f"🔄 **Reverse Strategy:** {'ON ✅ (channel shows opposite of raw signal)' if reverse_on else 'OFF ❌ (channel shows raw signal)'}\n"
         f"🔢 **Daily Sessions:** `{s.get('num_sessions')}`\n"
         f"⏰ **Session Timings (IST):** `{timings_str}`\n"
         f"🎯 **Trades per Session:** `{s.get('trades_per_session')}`\n"
         f"🔗 **Broker Link:** {s.get('login_link')}\n\n"
-        f"✍️ **Closing Review Message:**\n_{s.get('closing_message')}_\n\n"
+        f"✍️ **Closing Messages:** 3 set (2-min gap, end sticker 2 min after msg 3)\n\n"
         "👇 *Select an option below to configure settings:*"
     )
 
@@ -115,6 +260,10 @@ def register_admin_handlers(bot: telebot.TeleBot) -> None:
 
         data = call.data
         chat_id = call.message.chat.id
+
+        if data == "noop":
+            bot.answer_callback_query(call.id)
+            return
 
         if data == "cancel_action" or data == "refresh_panel":
             _user_states.pop(chat_id, None)
@@ -177,8 +326,7 @@ def register_admin_handlers(bot: telebot.TeleBot) -> None:
                 bot.answer_callback_query(call.id, f"Removed {target_ch}!", show_alert=True)
             else:
                 bot.answer_callback_query(call.id, "Channel not found.")
-            
-            # Refresh remove menu or go back to manager
+
             channels = get_channels()
             if channels:
                 bot.edit_message_text(
@@ -196,6 +344,91 @@ def register_admin_handlers(bot: telebot.TeleBot) -> None:
                     reply_markup=get_admin_menu_keyboard(),
                     parse_mode="Markdown"
                 )
+
+        # ---------------- PAIR SELECTOR ----------------
+
+        elif data == "mgr_pairs":
+            _user_states.pop(chat_id, None)
+            markup = get_pairs_page_keyboard(chat_id, 0)
+            bot.edit_message_text(
+                build_pairs_header_text(chat_id),
+                chat_id=chat_id,
+                message_id=call.message.message_id,
+                reply_markup=markup,
+                parse_mode="Markdown"
+            )
+            bot.answer_callback_query(call.id)
+
+        elif data.startswith("pg_"):
+            page = int(data.replace("pg_", ""))
+            markup = get_pairs_page_keyboard(chat_id, page)
+            bot.edit_message_text(
+                build_pairs_header_text(chat_id),
+                chat_id=chat_id,
+                message_id=call.message.message_id,
+                reply_markup=markup,
+                parse_mode="Markdown"
+            )
+            bot.answer_callback_query(call.id)
+
+        elif data == "pairs_back_to_list":
+            markup = get_pairs_page_keyboard(chat_id, 0)
+            bot.edit_message_text(
+                build_pairs_header_text(chat_id),
+                chat_id=chat_id,
+                message_id=call.message.message_id,
+                reply_markup=markup,
+                parse_mode="Markdown"
+            )
+            bot.answer_callback_query(call.id)
+
+        elif data.startswith("tp_"):
+            symbol = data.replace("tp_", "")
+            now_selected = toggle_pair_selection(symbol)
+            status_txt = "✅ Selected" if now_selected else "❌ Removed"
+            bot.answer_callback_query(call.id, f"{status_txt}: {_display_for_symbol(symbol)}")
+
+            nav = _pair_nav_state.get(chat_id, {"mode": "list", "page": 0, "query": ""})
+            if nav["mode"] == "search":
+                markup = get_pairs_search_results_keyboard(chat_id, nav["query"])
+            else:
+                markup = get_pairs_page_keyboard(chat_id, nav["page"])
+
+            bot.edit_message_text(
+                build_pairs_header_text(chat_id),
+                chat_id=chat_id,
+                message_id=call.message.message_id,
+                reply_markup=markup,
+                parse_mode="Markdown"
+            )
+
+        elif data == "pairs_search":
+            _user_states[chat_id] = "WAITING_PAIR_SEARCH"
+            bot.send_message(
+                chat_id,
+                "🔍 **Type the pair name to search** (e.g. `USD/JPY`, `usdjpy`, `AED`):",
+                reply_markup=get_cancel_keyboard(),
+                parse_mode="Markdown"
+            )
+            bot.answer_callback_query(call.id)
+
+        # ---------------- REVERSE STRATEGY ----------------
+
+        elif data == "toggle_reverse":
+            current = bool(get_all_settings().get("reverse_strategy", True))
+            update_setting("reverse_strategy", not current)
+            bot.answer_callback_query(
+                call.id,
+                f"Reverse Strategy is now {'ON' if not current else 'OFF'}!",
+                show_alert=True
+            )
+            bot.edit_message_text(
+                build_status_text(),
+                chat_id=chat_id,
+                message_id=call.message.message_id,
+                reply_markup=get_admin_menu_keyboard(),
+                parse_mode="Markdown"
+            )
 
         elif data == "set_sessions":
             _user_states[chat_id] = "WAITING_SESSIONS"
@@ -237,11 +470,35 @@ def register_admin_handlers(bot: telebot.TeleBot) -> None:
             )
             bot.answer_callback_query(call.id)
 
+        # ---------------- CLOSING MESSAGES (3-part) ----------------
+
         elif data == "set_msg":
-            _user_states[chat_id] = "WAITING_MSG"
+            _user_states.pop(chat_id, None)
+            s = get_all_settings()
+            msg = (
+                "✍️ **CLOSING MESSAGES**\n"
+                "_(Sent one after another after the last trade, 2-min gap between each. "
+                "End sticker fires 2 min after Message 3.)_\n\n"
+                f"**1️⃣ Message 1:**\n_{s.get('closing_msg_1')}_\n\n"
+                f"**2️⃣ Message 2:**\n_{s.get('closing_msg_2')}_\n\n"
+                f"**3️⃣ Message 3:**\n_{s.get('closing_msg_3')}_\n\n"
+                "👇 Tap a message number to edit it:"
+            )
+            bot.edit_message_text(
+                msg,
+                chat_id=chat_id,
+                message_id=call.message.message_id,
+                reply_markup=get_closing_msg_keyboard(),
+                parse_mode="Markdown"
+            )
+            bot.answer_callback_query(call.id)
+
+        elif data in ("set_msg_1", "set_msg_2", "set_msg_3"):
+            idx = data[-1]
+            _user_states[chat_id] = f"WAITING_MSG_{idx}"
             bot.send_message(
                 chat_id,
-                "✍️ Send the **Closing Review / Testimonial Message**:\n_(Posted in channels after session ends)_",
+                f"✍️ Send the new text for **Closing Message {idx}**:",
                 reply_markup=get_cancel_keyboard(),
                 parse_mode="Markdown"
             )
@@ -274,7 +531,18 @@ def register_admin_handlers(bot: telebot.TeleBot) -> None:
     def handle_admin_inputs(message: types.Message):
         chat_id = message.chat.id
         state = _user_states.pop(chat_id, None)
-        text = message.text.strip()
+        text = message.text.strip() if message.text else ""
+
+        # Pair search stays inside the Pair Selector UI, no dashboard refresh
+        if state == "WAITING_PAIR_SEARCH":
+            markup = get_pairs_search_results_keyboard(chat_id, text)
+            bot.send_message(
+                chat_id,
+                build_pairs_header_text(chat_id),
+                reply_markup=markup,
+                parse_mode="Markdown"
+            )
+            return
 
         if state == "WAITING_ADD_CHANNEL":
             if add_channel(text):
@@ -309,11 +577,12 @@ def register_admin_handlers(bot: telebot.TeleBot) -> None:
 
         elif state == "WAITING_LINK":
             update_setting("login_link", text)
-            bot.send_message(chat_id, f"✅ **Broker Login Link updated!**", parse_mode="Markdown")
+            bot.send_message(chat_id, "✅ **Broker Login Link updated!**", parse_mode="Markdown")
 
-        elif state == "WAITING_MSG":
-            update_setting("closing_message", text)
-            bot.send_message(chat_id, f"✅ **Closing Review Message updated!**", parse_mode="Markdown")
+        elif state in ("WAITING_MSG_1", "WAITING_MSG_2", "WAITING_MSG_3"):
+            idx = state[-1]
+            update_setting(f"closing_msg_{idx}", text)
+            bot.send_message(chat_id, f"✅ **Closing Message {idx} updated!**", parse_mode="Markdown")
 
         # Display updated dashboard
         bot.send_message(chat_id, build_status_text(), reply_markup=get_admin_menu_keyboard(), parse_mode="Markdown")
