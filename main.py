@@ -3,9 +3,9 @@ import sys
 from datetime import datetime
 import telebot
 
-from config import BOT_TOKEN, IST, TARGET_ASSETS
+from config import BOT_TOKEN, IST, ALL_OTC_PAIRS
 from database import initialize_db, get_all_settings
-from market_feed import start_market_feed, is_feed_active
+from market_feed import start_market_feed
 from scheduler import start_scheduler
 from admin_panel import register_admin_handlers
 
@@ -15,14 +15,16 @@ def print_banner() -> None:
     now_str = datetime.now(IST).strftime("%I:%M:%S %p IST | %d-%b-%Y")
     s = get_all_settings()
     timings = ", ".join(s.get("session_timings", []))
+    channels = s.get("target_channels", ["@webdealx"])
+    ch_str = ", ".join(channels) if isinstance(channels, list) else str(channels)
 
     print("=" * 70)
     print("🚀 POCKET OPTION MODULAR VIP SIGNAL ENGINE (PRODUCTION V2.0)")
     print(f"⏰ Launch Time: {now_str}")
-    print(f"📢 Target Channel: {s.get('target_channel')}")
+    print(f"📢 Target Channels: {ch_str}")
     print(f"⏰ Scheduled Sessions (IST): {timings}")
     print(f"🎯 Trades per Session: {s.get('trades_per_session')}")
-    print(f"📊 Monitored Watchlist: {len(TARGET_ASSETS)} High-Payout OTC Pairs")
+    print(f"📊 Monitored Watchlist: {len(ALL_OTC_PAIRS)} High-Payout OTC Pairs")
     print("=" * 70)
 
 
@@ -35,7 +37,7 @@ def main() -> None:
     bot = telebot.TeleBot(BOT_TOKEN)
 
     # 3. Start Live Market Feed Daemon
-    print("[1/3] 🔄 Starting Real-Time Market Data Streamer...")
+    print("[1/3] 🔄 Starting Real-Time Market Data Streamer (41 OTC Pairs)...")
     start_market_feed()
     time.sleep(2)
 
