@@ -2,20 +2,34 @@ import json
 import os
 import threading
 from typing import Any, Dict, List
-from config import SETTINGS_FILE, DEFAULT_LOGIN_LINK, DEFAULT_CLOSING_MSG
+from config import (
+    SETTINGS_FILE, 
+    DEFAULT_LOGIN_LINK, 
+    DEFAULT_CLOSING_MSG_1, 
+    DEFAULT_CLOSING_MSG_2, 
+    DEFAULT_CLOSING_MSG_3,
+    ALL_OTC_PAIRS
+)
 
 # Thread lock for safe concurrent file read/writes
 _db_lock = threading.Lock()
 
-# Default Base Configuration with Multi-Channel Support
+# Default Selected Pairs (First 7 high-payout pairs by default)
+DEFAULT_SELECTED_PAIRS = [p["symbol"] for p in ALL_OTC_PAIRS[:7]]
+
+# Default Base Configuration
 DEFAULT_SETTINGS: Dict[str, Any] = {
-    "target_channels": ["@webdealx"],     # List of Public (@username) or Private (-100xxxx) channels
-    "num_sessions": 2,                     # Default: 2 sessions per day
-    "session_timings": ["14:00", "19:00"], # 24-hour IST format (e.g. 14:00, 19:00)
-    "trades_per_session": 5,               # No. of trades in each session
-    "login_link": DEFAULT_LOGIN_LINK,      # Broker login / registration link
-    "closing_message": DEFAULT_CLOSING_MSG, # Testimonial / review closing text
-    "is_bot_active": True                  # Master switch for automation
+    "target_channels": ["@webdealx"],
+    "selected_pairs": DEFAULT_SELECTED_PAIRS,
+    "num_sessions": 2,
+    "session_timings": ["14:00", "19:00"],
+    "trades_per_session": 5,
+    "login_link": DEFAULT_LOGIN_LINK,
+    "closing_msg_1": DEFAULT_CLOSING_MSG_1,
+    "closing_msg_2": DEFAULT_CLOSING_MSG_2,
+    "closing_msg_3": DEFAULT_CLOSING_MSG_3,
+    "reverse_strategy": True,            # Invert signals (BUY -> SELL, SELL -> BUY)
+    "is_bot_active": True
 }
 
 
@@ -35,9 +49,11 @@ def get_all_settings() -> Dict[str, Any]:
             with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 
-                # Backward compatibility: Convert single channel to list if needed
+                # Migrations and backward compatibility
                 if "target_channel" in data and "target_channels" not in data:
                     data["target_channels"] = [data["target_channel"]]
+                if "closing_message" in data and "closing_msg_2" not in data:
+                    data["closing_msg_2"] = data["closing_message"]
                 
                 for k, v in DEFAULT_SETTINGS.items():
                     if k not in data:
@@ -90,6 +106,35 @@ def remove_channel(channel_id_or_username: str) -> bool:
         update_setting("target_channels", channels)
         return True
     return False
+
+
+def get_selected_pairs() -> List[str]:
+    """Returns list of symbols currently selected by the Admin."""
+    pairs = get_setting("selected_pairs", DEFAULT_SELECTED_PAIRS)
+    if not pairs:
+        return DEFAULT_SELECTED_PAIRS
+    return list(pairs)
+
+
+def toggle_pair_selection(symbol: str) -> bool:
+    """Toggles a pair's selection state. Returns True if now selected, False if unselected."""
+    selected = get_selected_pairs()
+    if symbol in selected:
+        if len(selected) > 1:  # Keep at least 1 pair selected
+            selected.remove(symbol)
+            is_now_selected = False
+        else:
+            return True
+    else:
+        selected.append(symbol)
+        is_now_selected = True
+    update_setting("selected_pairs", selected)
+    return is_now_selected
+
+
+def is_pair_selected(symbol: str) -> bool:
+    """Checks if a pair is in the active selected pairs list."""
+    return symbol in get_selected_pairs()
 
 
 # Initialize database file on import
