@@ -81,9 +81,10 @@ def _broadcast_text(text: str) -> None:
 def _execute_single_trade(trade_number: int, total_trades: int) -> None:
     """
     Executes a single trade cycle:
-    - Trade #1: Directly starts without Next One sticker.
-    - Trade #2+: Sends 'NEXT ONE' sticker at :15s (30s before pre-alert) without deleting it.
-    - Pre-Alert at :45s -> 15s gap -> Direction Alert at :00s.
+    1. Trade #2+: Sends 'NEXT ONE' sticker 30 seconds before pre-alert (at :15s mark, no deletion).
+    2. At :45s (T-15): Sends Pre-Alert.
+    3. At :55s (T-5 - EXACT 5 SECONDS BEFORE ENTRY): Sends Confirmed Direction (BUY/SELL).
+    4. Exact Entry Time is :00s.
     """
     # Send 'NEXT ONE' sticker starting from Trade #2 onwards
     if trade_number > 1:
@@ -93,11 +94,12 @@ def _execute_single_trade(trade_number: int, total_trades: int) -> None:
         print(f"\n[{get_now_ist().strftime('%I:%M:%S %p IST')}] 🖼️ Sending 'NEXT ONE' Sticker before Trade #{trade_number}...")
         _broadcast_sticker(MSG_ID_NEXT_TRADE_STICKER)
 
-    # Align to :45s mark for Pre-Alert
+    # -------------------------------------------------------------
+    # 1. ALIGN TO :45s MARK & SEND MESSAGE 1 (PRE-ALERT AT :45s)
+    # -------------------------------------------------------------
     while get_now_ist().second != 45:
         time.sleep(0.5)
 
-    # Find candidate from Admin-Selected pairs
     opportunity = find_next_trading_opportunity()
     if not opportunity:
         pair_meta = ALL_OTC_PAIRS[0]
@@ -110,7 +112,6 @@ def _execute_single_trade(trade_number: int, total_trades: int) -> None:
     entry_target_time = (now + timedelta(seconds=15)).strftime("%H:%M:00")
     bold_pair = to_bold_font(pair_meta['display'])
 
-    # MESSAGE 1: PRE-ALERT (Sent at :45s)
     pre_alert_text = (
         "⏳ GET READY -UPCOMING SIGNAL ⏳\n\n"
         f"🔹 Pair: {bold_pair}\n"
@@ -120,13 +121,17 @@ def _execute_single_trade(trade_number: int, total_trades: int) -> None:
         "⚠️ 𝘽𝙚 𝙧𝙚𝙖𝙙𝙮 𝙬𝙞𝙩𝙝 𝙩𝙝𝙚  𝙥𝙖𝙞𝙧 & 𝙨𝙚𝙩 𝙞𝙣𝙫𝙚𝙨𝙩𝙢𝙚𝙣𝙩! 𝘿𝙞𝙧𝙚𝙘𝙩𝙞𝙤𝙣 𝙘𝙤𝙢𝙞𝙣𝙜….."
     )
     _broadcast_text(pre_alert_text)
-    print(f"📢 [TRADE #{trade_number} PRE-ALERT] {sent_time} -> {pair_meta['display']} | Target: {entry_target_time}")
+    print(f"📢 [TRADE #{trade_number} PRE-ALERT] {sent_time} -> {pair_meta['display']} | Entry Target: {entry_target_time}")
 
-    # Wait exact 15 seconds to reach :00s candle open
-    time.sleep(15)
+    # -------------------------------------------------------------
+    # 2. WAIT 10 SECONDS (Reaches :55s - EXACT 5 SECONDS BEFORE ENTRY)
+    # -------------------------------------------------------------
+    time.sleep(10)
 
-    # MESSAGE 2: CONFIRMED DIRECTION (Sent at :00s)
-    entry_now_time = get_now_ist().strftime("%H:%M:00")
+    # -------------------------------------------------------------
+    # 3. SEND MESSAGE 2 (DIRECTION ALERT AT :55s)
+    # -------------------------------------------------------------
+    dir_sent_time = get_now_ist().strftime("%H:%M:55")
 
     if direction == "CALL":
         dir_badge = "🟢 𝘽𝙐𝙔 (𝘾𝘼𝙇𝙇)"
@@ -137,12 +142,12 @@ def _execute_single_trade(trade_number: int, total_trades: int) -> None:
         "⚡SIGNAL CONFIRMED -TAKE ENTRY⚡\n\n"
         f"🔹 Pair: {pair_meta['display']}\n\n"
         f"🎯 Direction: {dir_badge}\n\n"
-        f"⏰ Exact Entry Time: {entry_now_time}\n"
+        f"⏰ Exact Entry Time: {entry_target_time}\n"
         "⏱️ Expiry: 1 Minute\n\n"
         "👉 ALWAYS ENTER IN FRESH CANDLE"
     )
     _broadcast_text(entry_text)
-    print(f"🚀 [TRADE #{trade_number} DIRECTION] {entry_now_time} -> {pair_meta['display']} | {direction}")
+    print(f"🚀 [TRADE #{trade_number} DIRECTION SENT (5s ADVANCE)] {dir_sent_time} -> {pair_meta['display']} | {direction} (Target: {entry_target_time})")
 
 
 def run_session(total_trades: int) -> None:
