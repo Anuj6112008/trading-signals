@@ -173,9 +173,12 @@ def run_session(total_trades: int) -> None:
             print(f"⏳ Waiting 3 minutes before Trade #{trade_idx + 1}...")
             time.sleep(110)
 
-    # 3. Session End: 3 Sequential Closing Messages (2-min gap) + Delayed 414 Sticker
-    print("\n🏁 [TRADES FINISHED] Starting Closing Messages Sequence (2-Min Gaps)...")
-    
+    # -------------------------------------------------------------
+    # 3. SESSION END: 2-MIN GAP BEFORE MSG 1 + 2-MIN GAPS SEQUENTIAL
+    # -------------------------------------------------------------
+    print("\n🏁 [LAST TRADE COMPLETED] Waiting 2 minutes before Sending Closing Message 1...")
+    time.sleep(120)  # <-- 🔥 2-MINUTE GAP AFTER LAST TRADE!
+
     msg_1 = get_setting("closing_msg_1", "Session completed!")
     msg_2 = get_setting("closing_msg_2", "Thnx for attending the session\nKindly send your reviews/ testimonials on @traderskull")
     msg_3 = get_setting("closing_msg_3", "See you in next session!")
