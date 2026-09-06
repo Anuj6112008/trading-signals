@@ -1,6 +1,6 @@
 import math
 from typing import Any, Dict, List
-
+import threading
 import telebot
 from telebot import types
 
@@ -16,7 +16,6 @@ from database import (
     is_pair_selected,
 )
 from scheduler import run_session, is_session_active
-import threading
 
 # Admin state memory for multi-step text inputs
 _user_states: Dict[int, str] = {}
@@ -25,7 +24,7 @@ _user_states: Dict[int, str] = {}
 # {"mode": "list" | "search", "page": int, "query": str}
 _pair_nav_state: Dict[int, Dict[str, Any]] = {}
 
-PAIRS_PER_PAGE = 10  # 5 rows x 2 pairs, matches the [pair][pair] x5 layout
+PAIRS_PER_PAGE = 10  # 5 rows x 2 pairs layout
 
 
 def is_admin(user_id: int) -> bool:
@@ -35,29 +34,42 @@ def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
 
-def get_cancel_keyboard() -> types.InlineKeyboardMarkup:
+def get_cancel_keyboard(back_callback: str = "cancel_action") -> types.InlineKeyboardMarkup:
     """Generates a standalone Cancel inline button."""
     markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("❌ Cancel", callback_data="cancel_action"))
+    markup.add(types.InlineKeyboardButton("❌ Cancel / Back", callback_data=back_callback))
     return markup
 
 
 def get_admin_menu_keyboard() -> types.InlineKeyboardMarkup:
     """Generates the main interactive admin dashboard keyboard."""
     markup = types.InlineKeyboardMarkup(row_width=2)
+    s = get_all_settings()
 
+    # Dynamic status labels
+    is_active = s.get("is_bot_active", True)
+    session_btn_text = "🟢 Sessions: ON (Auto)" if is_active else "🔴 Sessions: OFF (Muted)"
+    rev_status = "ON 🔄" if s.get("reverse_strategy", True) else "OFF ❌"
+
+    btn_session_toggle = types.InlineKeyboardButton(session_btn_text, callback_data="toggle_session_active")
     btn_channel_mgr = types.InlineKeyboardButton("📢 Channel Manager", callback_data="mgr_channels")
     btn_pairs = types.InlineKeyboardButton("💱 Select Pairs", callback_data="mgr_pairs")
+    
+    btn_expiry = types.InlineKeyboardButton(f"⏱️ Expiry: {s.get('expiry_text', '𝟏 𝙈𝙞𝙣')}", callback_data="set_expiry_text")
+    btn_invest = types.InlineKeyboardButton(f"🤑 Invest: {s.get('investment_text', '𝟓%')}", callback_data="set_invest_text")
+    
     btn_sessions = types.InlineKeyboardButton("🔢 No. of Sessions", callback_data="set_sessions")
     btn_timings = types.InlineKeyboardButton("⏰ Session Timings", callback_data="set_timings")
     btn_trades = types.InlineKeyboardButton("🎯 Trades per Session", callback_data="set_trades")
     btn_link = types.InlineKeyboardButton("🔗 Broker Login Link", callback_data="set_link")
-    btn_msg = types.InlineKeyboardButton("✍️ Closing Messages", callback_data="set_msg")
-    btn_reverse = types.InlineKeyboardButton("🔄 Toggle Reverse Strategy", callback_data="toggle_reverse")
+    btn_msg = types.InlineKeyboardButton("✍️ 3 Closing Messages", callback_data="set_msg")
+    btn_reverse = types.InlineKeyboardButton(f"🔄 Reverse: {rev_status}", callback_data="toggle_reverse")
     btn_start_now = types.InlineKeyboardButton("🚀 Start Session NOW (Test)", callback_data="start_now")
     btn_refresh = types.InlineKeyboardButton("🔄 Refresh Dashboard", callback_data="refresh_panel")
 
+    markup.add(btn_session_toggle)
     markup.add(btn_channel_mgr, btn_pairs)
+    markup.add(btn_expiry, btn_invest)
     markup.add(btn_sessions, btn_timings)
     markup.add(btn_trades, btn_link)
     markup.add(btn_msg, btn_reverse)
@@ -90,9 +102,9 @@ def get_remove_channels_keyboard() -> types.InlineKeyboardMarkup:
 def get_closing_msg_keyboard() -> types.InlineKeyboardMarkup:
     """Sub-menu to edit the 3 sequential closing messages."""
     markup = types.InlineKeyboardMarkup(row_width=1)
-    markup.add(types.InlineKeyboardButton("✍️ Message 1", callback_data="set_msg_1"))
-    markup.add(types.InlineKeyboardButton("✍️ Message 2", callback_data="set_msg_2"))
-    markup.add(types.InlineKeyboardButton("✍️ Message 3", callback_data="set_msg_3"))
+    markup.add(types.InlineKeyboardButton("1️⃣ Edit Message 1", callback_data="set_msg_1"))
+    markup.add(types.InlineKeyboardButton("2️⃣ Edit Message 2", callback_data="set_msg_2"))
+    markup.add(types.InlineKeyboardButton("3️⃣ Edit Message 3", callback_data="set_msg_3"))
     markup.add(types.InlineKeyboardButton("🔙 Back to Dashboard", callback_data="refresh_panel"))
     return markup
 
@@ -195,7 +207,7 @@ def build_pairs_header_text(chat_id: int) -> str:
     return (
         header
         + f"✅ **Currently Selected ({len(selected)}):**\n{selected_str}\n\n"
-        + "Tap a pair below to select / deselect it (any number of pairs allowed)."
+        + "Tap a pair below to select / deselect it."
     )
 
 
@@ -209,7 +221,14 @@ def build_status_text() -> str:
     channels = get_channels()
     channels_str = "\n".join([f"  • `{ch}`" for ch in channels]) if channels else "  • _None configured_"
     timings_str = ", ".join(s.get("session_timings", []))
-    session_status = "🟢 ACTIVE (Running)" if is_session_active() else "⚪ IDLE (Waiting for Schedule)"
+    
+    is_active = s.get("is_bot_active", True)
+    if is_session_active():
+        session_status = "🟢 ACTIVE (Session Currently Running!)"
+    elif is_active:
+        session_status = "🟢 SCHEDULED (Auto-Sessions ON)"
+    else:
+        session_status = "🔴 MUTED (Sessions OFF — No auto sessions will post)"
 
     selected = get_selected_pairs()
     preview_syms = selected[:5]
@@ -220,15 +239,16 @@ def build_status_text() -> str:
 
     return (
         "⚙️ **POCKET OPTION VIP BOT — ADMIN DASHBOARD** ⚙️\n\n"
-        f"📊 **Live Status:** {session_status}\n\n"
+        f"📊 **Auto-Session Status:** `{session_status}`\n"
+        f"⏱️ **Expiry Display:** `{s.get('expiry_text', '𝟏 𝙈𝙞𝙣𝙪𝙩𝙚𝙨')}`\n"
+        f"🤑 **Investment Display:** `{s.get('investment_text', '𝟓%')}`\n"
+        f"🔄 **Reverse Strategy:** {'ON ✅ (Inverted)' if reverse_on else 'OFF ❌ (Normal)'}\n\n"
         f"📢 **Target Channels ({len(channels)}):**\n{channels_str}\n\n"
-        f"💱 **Selected Pairs ({len(selected)}):** {pairs_preview}\n"
-        f"🔄 **Reverse Strategy:** {'ON ✅ (channel shows opposite of raw signal)' if reverse_on else 'OFF ❌ (channel shows raw signal)'}\n"
+        f"💱 **Selected Pairs ({len(selected)}/41):** {pairs_preview}\n"
         f"🔢 **Daily Sessions:** `{s.get('num_sessions')}`\n"
         f"⏰ **Session Timings (IST):** `{timings_str}`\n"
         f"🎯 **Trades per Session:** `{s.get('trades_per_session')}`\n"
         f"🔗 **Broker Link:** {s.get('login_link')}\n\n"
-        f"✍️ **Closing Messages:** 3 set (2-min gap, end sticker 2 min after msg 3)\n\n"
         "👇 *Select an option below to configure settings:*"
     )
 
@@ -276,6 +296,42 @@ def register_admin_handlers(bot: telebot.TeleBot) -> None:
             )
             bot.answer_callback_query(call.id, "Dashboard Ready!")
 
+        # ---------------- SESSION ON/OFF SWITCH ----------------
+        elif data == "toggle_session_active":
+            curr = get_all_settings().get("is_bot_active", True)
+            update_setting("is_bot_active", not curr)
+            status_alert = "Sessions ENABLED (ON) 🟢" if not curr else "Sessions DISABLED (OFF) 🔴"
+            bot.answer_callback_query(call.id, status_alert, show_alert=True)
+            bot.edit_message_text(
+                build_status_text(),
+                chat_id=chat_id,
+                message_id=call.message.message_id,
+                reply_markup=get_admin_menu_keyboard(),
+                parse_mode="Markdown"
+            )
+
+        # ---------------- DYNAMIC EXPIRY & INVESTMENT ----------------
+        elif data == "set_expiry_text":
+            _user_states[chat_id] = "WAITING_EXPIRY_TEXT"
+            msg = (
+                "⏱️ **Set Expiry Display Text**\n\n"
+                "Send the exact text you want to show for Expiry in messages:\n"
+                "👉 Examples: `𝟏 𝙈𝙞𝙣𝙪𝙩𝙚𝙨` or `𝟓 𝙈𝙞𝙣𝙪𝙩𝙚𝙨` or `1 Minute`"
+            )
+            bot.send_message(chat_id, msg, reply_markup=get_cancel_keyboard(), parse_mode="Markdown")
+            bot.answer_callback_query(call.id)
+
+        elif data == "set_invest_text":
+            _user_states[chat_id] = "WAITING_INVEST_TEXT"
+            msg = (
+                "🤑 **Set Investment % Display Text**\n\n"
+                "Send the exact text you want to show for Investment in messages:\n"
+                "👉 Examples: `𝟓%` or `𝟐%` or `1% - 2%`"
+            )
+            bot.send_message(chat_id, msg, reply_markup=get_cancel_keyboard(), parse_mode="Markdown")
+            bot.answer_callback_query(call.id)
+
+        # ---------------- CHANNEL MANAGER ----------------
         elif data == "mgr_channels":
             _user_states.pop(chat_id, None)
             channels = get_channels()
@@ -303,7 +359,7 @@ def register_admin_handlers(bot: telebot.TeleBot) -> None:
                 "• For **Private Channel:** Send channel ID (e.g. `-1001234567890`)\n\n"
                 "⚠️ *Make sure the bot is added as Admin in the channel first!*"
             )
-            bot.send_message(chat_id, msg, reply_markup=get_cancel_keyboard(), parse_mode="Markdown")
+            bot.send_message(chat_id, msg, reply_markup=get_cancel_keyboard("mgr_channels"), parse_mode="Markdown")
             bot.answer_callback_query(call.id)
 
         elif data == "ch_remove_menu":
@@ -407,7 +463,7 @@ def register_admin_handlers(bot: telebot.TeleBot) -> None:
             bot.send_message(
                 chat_id,
                 "🔍 **Type the pair name to search** (e.g. `USD/JPY`, `usdjpy`, `AED`):",
-                reply_markup=get_cancel_keyboard(),
+                reply_markup=get_cancel_keyboard("pairs_page_0"),
                 parse_mode="Markdown"
             )
             bot.answer_callback_query(call.id)
@@ -476,8 +532,8 @@ def register_admin_handlers(bot: telebot.TeleBot) -> None:
             _user_states.pop(chat_id, None)
             s = get_all_settings()
             msg = (
-                "✍️ **CLOSING MESSAGES**\n"
-                "_(Sent one after another after the last trade, 2-min gap between each. "
+                "✍️ **3 SEQUENTIAL CLOSING MESSAGES**\n"
+                "_(Sent one after another after the last trade with 2-min gaps. "
                 "End sticker fires 2 min after Message 3.)_\n\n"
                 f"**1️⃣ Message 1:**\n_{s.get('closing_msg_1')}_\n\n"
                 f"**2️⃣ Message 2:**\n_{s.get('closing_msg_2')}_\n\n"
@@ -499,7 +555,7 @@ def register_admin_handlers(bot: telebot.TeleBot) -> None:
             bot.send_message(
                 chat_id,
                 f"✍️ Send the new text for **Closing Message {idx}**:",
-                reply_markup=get_cancel_keyboard(),
+                reply_markup=get_cancel_keyboard("set_msg"),
                 parse_mode="Markdown"
             )
             bot.answer_callback_query(call.id)
@@ -533,8 +589,15 @@ def register_admin_handlers(bot: telebot.TeleBot) -> None:
         state = _user_states.pop(chat_id, None)
         text = message.text.strip() if message.text else ""
 
-        # Pair search stays inside the Pair Selector UI, no dashboard refresh
-        if state == "WAITING_PAIR_SEARCH":
+        if state == "WAITING_EXPIRY_TEXT":
+            update_setting("expiry_text", text)
+            bot.send_message(chat_id, f"✅ **Expiry display text updated to:** `{text}`", parse_mode="Markdown")
+
+        elif state == "WAITING_INVEST_TEXT":
+            update_setting("investment_text", text)
+            bot.send_message(chat_id, f"✅ **Investment % display text updated to:** `{text}`", parse_mode="Markdown")
+
+        elif state == "WAITING_PAIR_SEARCH":
             markup = get_pairs_search_results_keyboard(chat_id, text)
             bot.send_message(
                 chat_id,
@@ -544,7 +607,7 @@ def register_admin_handlers(bot: telebot.TeleBot) -> None:
             )
             return
 
-        if state == "WAITING_ADD_CHANNEL":
+        elif state == "WAITING_ADD_CHANNEL":
             if add_channel(text):
                 bot.send_message(chat_id, f"✅ **Added Target Channel:** `{text}`", parse_mode="Markdown")
             else:
