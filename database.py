@@ -5,6 +5,8 @@ from typing import Any, Dict, List
 from config import (
     SETTINGS_FILE, 
     DEFAULT_LOGIN_LINK, 
+    DEFAULT_EXPIRY_TEXT,
+    DEFAULT_INVESTMENT_TEXT,
     DEFAULT_CLOSING_MSG_1, 
     DEFAULT_CLOSING_MSG_2, 
     DEFAULT_CLOSING_MSG_3,
@@ -14,7 +16,7 @@ from config import (
 # Thread lock for safe concurrent file read/writes
 _db_lock = threading.Lock()
 
-# Default Selected Pairs (First 7 high-payout pairs by default)
+# Default Selected Pairs
 DEFAULT_SELECTED_PAIRS = [p["symbol"] for p in ALL_OTC_PAIRS[:7]]
 
 # Default Base Configuration
@@ -25,11 +27,13 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "session_timings": ["14:00", "19:00"],
     "trades_per_session": 5,
     "login_link": DEFAULT_LOGIN_LINK,
+    "expiry_text": DEFAULT_EXPIRY_TEXT,          # Dynamic Expiry display text
+    "investment_text": DEFAULT_INVESTMENT_TEXT,  # Dynamic Investment display text
     "closing_msg_1": DEFAULT_CLOSING_MSG_1,
     "closing_msg_2": DEFAULT_CLOSING_MSG_2,
     "closing_msg_3": DEFAULT_CLOSING_MSG_3,
-    "reverse_strategy": True,            # Invert signals (BUY -> SELL, SELL -> BUY)
-    "is_bot_active": True
+    "reverse_strategy": True,                    # Invert signals (BUY -> SELL, SELL -> BUY)
+    "is_bot_active": True                        # Master Session ON/OFF switch
 }
 
 
@@ -117,10 +121,10 @@ def get_selected_pairs() -> List[str]:
 
 
 def toggle_pair_selection(symbol: str) -> bool:
-    """Toggles a pair's selection state. Returns True if now selected, False if unselected."""
+    """Toggles a pair's selection state."""
     selected = get_selected_pairs()
     if symbol in selected:
-        if len(selected) > 1:  # Keep at least 1 pair selected
+        if len(selected) > 1:
             selected.remove(symbol)
             is_now_selected = False
         else:
