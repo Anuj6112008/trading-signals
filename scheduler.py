@@ -1,4 +1,5 @@
 import time
+import re
 import threading
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any
@@ -41,6 +42,25 @@ def normalize_time_str(time_str: str) -> str:
         return time_str.strip()
 
 
+def parse_expiry_seconds(expiry_text: str) -> int:
+    """
+    Extracts the number of minutes from any expiry string (including Math Bold digits like 𝟏, 𝟓)
+    and converts to seconds.
+    """
+    normalized = ""
+    for ch in str(expiry_text):
+        if '0' <= ch <= '9':
+            normalized += ch
+        elif '\U0001D7CE' <= ch <= '\U0001D7D7':  # Mathematical Bold 𝟎-𝟗
+            normalized += str(ord(ch) - 0x1D7CE)
+
+    match = re.search(r'\d+', normalized)
+    if match:
+        mins = int(match.group())
+        return max(1, mins) * 60
+    return 60  # Default to 1 minute (60s)
+
+
 def to_bold_font(text: str) -> str:
     """Converts regular text to Mathematical Bold Unicode font (e.g. USD/JPY -> 𝐔𝐒𝐃/𝐉𝐏𝐘)."""
     result = []
@@ -57,10 +77,7 @@ def to_bold_font(text: str) -> str:
 
 
 def e(key: str, fallback: str) -> str:
-    """
-    Returns custom emoji HTML tag if ID is configured in config.py,
-    otherwise returns standard Unicode fallback emoji safely (Zero-Crash).
-    """
+    """Returns custom emoji HTML tag if configured, else returns standard Unicode fallback."""
     emoji_id = CUSTOM_EMOJI_IDS.get(key, "").strip()
     if emoji_id:
         return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
@@ -95,20 +112,11 @@ def _broadcast_text(text: str, parse_mode: Optional[str] = "HTML") -> None:
 
 def _execute_single_trade(trade_number: int, total_trades: int) -> None:
     """
-    Executes a single trade cycle:
-    1. Trade #2+: Sends 'NEXT ONE' sticker at :00s.
-    2. At :30s: Sends Message 1 (Pre-Alert with dynamic Expiry & Investment).
-    3. At :55s (25s later): Sends Message 2 (Confirmed Direction).
-    4. Fresh candle starts at :00s.
+    Executes a single trade sequence:
+    1. At :30s: Sends Pre-Alert (Message 1).
+    2. At :55s: Sends Direction Alert (Message 2).
+    3. Trade opens at :00s.
     """
-    # Send 'NEXT ONE' sticker starting from Trade #2 onwards at :00s
-    if trade_number > 1:
-        while get_now_ist().second != 0:
-            time.sleep(0.5)
-
-        print(f"\n[{get_now_ist().strftime('%I:%M:%S %p IST')}] 🖼️ Sending 'NEXT ONE' Sticker before Trade #{trade_number}...")
-        _broadcast_sticker(MSG_ID_NEXT_TRADE_STICKER)
-
     # -------------------------------------------------------------
     # 1. ALIGN TO :30s MARK & SEND MESSAGE 1 (PRE-ALERT AT :30s)
     # -------------------------------------------------------------
@@ -126,17 +134,16 @@ def _execute_single_trade(trade_number: int, total_trades: int) -> None:
     sent_time = now.strftime("%H:%M:30")
     bold_pair = to_bold_font(pair_meta['display'])
 
-    # Read dynamic Expiry and Investment % from settings
     expiry_txt = get_setting("expiry_text", "𝟏 𝙈𝙞𝙣𝙪𝙩𝙚𝙨")
     invest_txt = get_setting("investment_text", "𝟓%")
 
-    # MESSAGE 1: PRE-ALERT (Sent at :30s)
+    # MESSAGE 1: PRE-ALERT (Sent at :30s - No Entry Time line)
     pre_alert_text = (
         f"{e('hourglass', '⏳')} <b>GET READY -UPCOMING SIGNAL</b> {e('hourglass', '⏳')}\n\n"
         f"{e('diamond', '🔹')} Pair: <b>{bold_pair}</b>\n"
         f"{e('stopwatch', '⏱️')} Expiry: <b>{expiry_txt}</b>\n"
         f"{e('money', '🤑')} Investment : <b>{invest_txt}</b>\n\n"
-        f"{e('warning', '⚠️')} <b><i>𝘽𝙚 𝙧𝙚𝙖𝙙𝙮 𝙬𝙞𝙩𝙝 𝙩𝙝𝙚  𝙥𝙖𝙞𝙧 &amp;\n\n"
+        f"{e('warning', '⚠️')} <b><i>𝘽𝙚 𝙧𝙚𝙖𝙙𝙮 𝙬𝙞𝙩𝙝 𝙩𝙝𝙚  𝙥𝙖𝙞𝙧 &\n\n"
         f" 𝙨𝙚𝙩 𝙞𝙣𝙫𝙚𝙨𝙩𝙢𝙚𝙣𝙩! 𝘿𝙞𝙧𝙚𝙘𝙩𝙞𝙤𝙣 𝙘𝙤𝙢𝙞𝙣𝙜…..</i></b>"
     )
     _broadcast_text(pre_alert_text, parse_mode="HTML")
@@ -157,7 +164,6 @@ def _execute_single_trade(trade_number: int, total_trades: int) -> None:
     else:
         dir_badge = f"{e('red_circle', '🔴')} <b><i>𝙎𝙀𝙇𝙇 (𝙋𝙐𝙏)</i></b>"
 
-    # MESSAGE 2: CONFIRMED DIRECTION (Sent at :55s)
     entry_text = (
         f"{e('zap', '⚡')}<b>SIGNAL CONFIRMED -TAKE ENTRY</b>{e('zap', '⚡')}\n\n"
         f"{e('diamond', '🔹')} Pair: <b>{pair_meta['display']}</b>\n\n"
@@ -181,22 +187,38 @@ def run_session(total_trades: int) -> None:
     _broadcast_sticker(MSG_ID_START_STICKER)
     time.sleep(5)
 
-    # 2. Execute trades sequentially with 3-minute intervals
+    # 2. Execute trades sequentially with Dynamic (Expiry + 30s + 60s) intervals
     for trade_idx in range(1, total_trades + 1):
         if _stop_event.is_set():
             break
-        
+
+        # Execute Trade (Pre-Alert at :30s -> Direction at :55s)
         _execute_single_trade(trade_idx, total_trades)
 
+        # Dynamic Post-Trade Gap if there is a next trade
         if trade_idx < total_trades:
-            print(f"⏳ Waiting 3 minutes before Trade #{trade_idx + 1}...")
-            time.sleep(110)
+            expiry_str = get_setting("expiry_text", "𝟏 𝙈𝙞𝙣𝙪𝙩𝙚𝙨")
+            expiry_secs = parse_expiry_seconds(expiry_str)
+
+            print(f"\n⏳ [TRADE #{trade_idx} RUNNING] Waiting for Expiry ({expiry_secs}s)...")
+            time.sleep(expiry_secs)  # 1. Wait for trade expiry to complete
+
+            print(f"⏳ [POST-EXPIRY WAIT] Waiting 30s before sending 'NEXT ONE' Sticker...")
+            time.sleep(30)          # 2. Wait 30s
+
+            print(f"🖼️ [{get_now_ist().strftime('%I:%M:%S %p IST')}] Sending 'NEXT ONE' Sticker for Trade #{trade_idx + 1}...")
+            _broadcast_sticker(MSG_ID_NEXT_TRADE_STICKER)  # 3. Send Next One Sticker
+
+            print(f"⏳ [POST-STICKER WAIT] Waiting 60s before Trade #{trade_idx + 1}...")
+            time.sleep(60)          # 4. Wait 60s -> Next trade loop aligns to :30s pre-alert
 
     # -------------------------------------------------------------
-    # 3. SESSION END: 2-MIN GAP BEFORE MSG 1 + 2-MIN GAPS SEQUENTIAL
+    # 3. SESSION END: Wait Expiry + 2-MIN GAPS SEQUENTIAL
     # -------------------------------------------------------------
-    print("\n🏁 [LAST TRADE COMPLETED] Waiting 2 minutes before Sending Closing Message 1...")
-    time.sleep(120)
+    expiry_str = get_setting("expiry_text", "𝟏 𝙈𝙞𝙣𝙪𝙩𝙚𝙨")
+    last_expiry_secs = parse_expiry_seconds(expiry_str)
+    print(f"\n🏁 [LAST TRADE RUNNING] Waiting {last_expiry_secs}s (Expiry) + 120s before Message 1...")
+    time.sleep(last_expiry_secs + 120)
 
     msg_1 = get_setting("closing_msg_1", "Session completed!")
     msg_2 = get_setting("closing_msg_2", "Thnx for attending the session\nKindly send your reviews/ testimonials on @traderskull")
@@ -233,7 +255,6 @@ def _scheduler_worker() -> None:
     print("⏰ [SCHEDULER RUNNING] Monitoring configured session timings 24/7...")
 
     while not _stop_event.is_set():
-        # 🔥 SESSION ON/OFF CHECK: If bot is turned OFF by admin, do not execute scheduled events
         if not get_setting("is_bot_active", True) or _is_session_running:
             time.sleep(3)
             continue
@@ -286,7 +307,6 @@ def _scheduler_worker() -> None:
                     if event_key_start not in last_started_sessions:
                         last_started_sessions.add(event_key_start)
 
-                        # Launch Session in dedicated thread
                         t = threading.Thread(
                             target=run_session,
                             args=(trades_per_session,),
