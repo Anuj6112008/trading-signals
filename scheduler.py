@@ -7,6 +7,7 @@ from config import (
     BOT_TOKEN, 
     IST, 
     ALL_OTC_PAIRS,
+    CUSTOM_EMOJI_IDS,
     STICKER_SOURCE_CHANNEL,
     MSG_ID_5MIN_STICKER,
     MSG_ID_START_STICKER,
@@ -55,6 +56,17 @@ def to_bold_font(text: str) -> str:
     return "".join(result)
 
 
+def e(key: str, fallback: str) -> str:
+    """
+    Returns custom emoji HTML tag if ID is configured in config.py,
+    otherwise returns standard Unicode fallback emoji safely (Zero-Crash).
+    """
+    emoji_id = CUSTOM_EMOJI_IDS.get(key, "").strip()
+    if emoji_id:
+        return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
+    return fallback
+
+
 def _broadcast_sticker(message_id: int) -> None:
     """Broadcasts a sticker to all configured target channels."""
     channels = get_channels()
@@ -68,21 +80,24 @@ def _broadcast_sticker(message_id: int) -> None:
                 print(f"❌ Error sending sticker {message_id} to {ch}: {e}")
 
 
-def _broadcast_text(text: str) -> None:
-    """Broadcasts a text message to all configured target channels."""
+def _broadcast_text(text: str, parse_mode: Optional[str] = "HTML") -> None:
+    """Broadcasts a formatted message to all configured target channels."""
     channels = get_channels()
     for ch in channels:
         try:
-            bot.send_message(ch, text)
-        except Exception as e:
-            print(f"❌ Error sending message to {ch}: {e}")
+            bot.send_message(ch, text, parse_mode=parse_mode)
+        except Exception:
+            try:
+                bot.send_message(ch, text)
+            except Exception as e:
+                print(f"❌ Error sending message to {ch}: {e}")
 
 
 def _execute_single_trade(trade_number: int, total_trades: int) -> None:
     """
     Executes a single trade cycle:
     1. Trade #2+: Sends 'NEXT ONE' sticker at :00s.
-    2. At :30s: Sends Message 1 (Pre-Alert without entry time, 5% investment, 1 Minutes).
+    2. At :30s: Sends Message 1 (Pre-Alert with dynamic Expiry & Investment).
     3. At :55s (25s later): Sends Message 2 (Confirmed Direction).
     4. Fresh candle starts at :00s.
     """
@@ -111,16 +126,20 @@ def _execute_single_trade(trade_number: int, total_trades: int) -> None:
     sent_time = now.strftime("%H:%M:30")
     bold_pair = to_bold_font(pair_meta['display'])
 
-    # EXACT FORMAT REQUESTED FOR MESSAGE 1
+    # Read dynamic Expiry and Investment % from settings
+    expiry_txt = get_setting("expiry_text", "𝟏 𝙈𝙞𝙣𝙪𝙩𝙚𝙨")
+    invest_txt = get_setting("investment_text", "𝟓%")
+
+    # MESSAGE 1: PRE-ALERT (Sent at :30s)
     pre_alert_text = (
-        "⏳ GET READY -UPCOMING SIGNAL ⏳\n\n"
-        f"🔹 Pair: {bold_pair}\n"
-        "⏱️ Expiry: 𝟏 𝙈𝙞𝙣𝙪𝙩𝙚𝙨\n"
-        "🤑 Investment : 𝟓%\n\n"
-        "⚠️ 𝘽𝙚 𝙧𝙚𝙖𝙙𝙮 𝙬𝙞𝙩𝙝 𝙩𝙝𝙚  𝙥𝙖𝙞𝙧 &\n\n"
-        " 𝙨𝙚𝙩 𝙞𝙣𝙫𝙚𝙨𝙩𝙢𝙚𝙣𝙩! 𝘿𝙞𝙧𝙚𝙘𝙩𝙞𝙤𝙣 𝙘𝙤𝙢𝙞𝙣𝙜…."
+        f"{e('hourglass', '⏳')} <b>GET READY -UPCOMING SIGNAL</b> {e('hourglass', '⏳')}\n\n"
+        f"{e('diamond', '🔹')} Pair: <b>{bold_pair}</b>\n"
+        f"{e('stopwatch', '⏱️')} Expiry: <b>{expiry_txt}</b>\n"
+        f"{e('money', '🤑')} Investment : <b>{invest_txt}</b>\n\n"
+        f"{e('warning', '⚠️')} <b><i>𝘽𝙚 𝙧𝙚𝙖𝙙𝙮 𝙬𝙞𝙩𝙝 𝙩𝙝𝙚  𝙥𝙖𝙞𝙧 &amp;\n\n"
+        f" 𝙨𝙚𝙩 𝙞𝙣𝙫𝙚𝙨𝙩𝙢𝙚𝙣𝙩! 𝘿𝙞𝙧𝙚𝙘𝙩𝙞𝙤𝙣 𝙘𝙤𝙢𝙞𝙣𝙜…..</i></b>"
     )
-    _broadcast_text(pre_alert_text)
+    _broadcast_text(pre_alert_text, parse_mode="HTML")
     print(f"📢 [TRADE #{trade_number} PRE-ALERT SENT AT :30s] {sent_time} -> {pair_meta['display']}")
 
     # -------------------------------------------------------------
@@ -134,19 +153,19 @@ def _execute_single_trade(trade_number: int, total_trades: int) -> None:
     dir_sent_time = get_now_ist().strftime("%H:%M:55")
 
     if direction == "CALL":
-        dir_badge = "🟢 𝘽𝙐𝙔 (𝘾𝘼𝙇𝙇)"
+        dir_badge = f"{e('green_circle', '🟢')} <b><i>𝘽𝙐𝙔 (𝘾𝘼𝙇𝙇)</i></b>"
     else:
-        dir_badge = "🔴 𝙎𝙀𝙇𝙇 (𝙋𝙐𝙏)"
+        dir_badge = f"{e('red_circle', '🔴')} <b><i>𝙎𝙀𝙇𝙇 (𝙋𝙐𝙏)</i></b>"
 
-    # EXACT FORMAT REQUESTED FOR MESSAGE 2 (NO ENTRY TIME LINE)
+    # MESSAGE 2: CONFIRMED DIRECTION (Sent at :55s)
     entry_text = (
-        "⚡SIGNAL CONFIRMED -TAKE ENTRY⚡\n\n"
-        f"🔹 Pair: {pair_meta['display']}\n\n"
-        f"🎯 Direction: {dir_badge}\n\n"
-        "⏱️ Expiry: 1 Minute\n\n"
-        "👉 ALWAYS ENTER IN FRESH CANDLE"
+        f"{e('zap', '⚡')}<b>SIGNAL CONFIRMED -TAKE ENTRY</b>{e('zap', '⚡')}\n\n"
+        f"{e('diamond', '🔹')} Pair: <b>{pair_meta['display']}</b>\n\n"
+        f"{e('target', '🎯')} Direction: {dir_badge}\n\n"
+        f"{e('stopwatch', '⏱️')} Expiry: <b>{expiry_txt}</b>\n\n"
+        f"{e('pointer', '👉')} <b>ALWAYS ENTER IN FRESH CANDLE</b>"
     )
-    _broadcast_text(entry_text)
+    _broadcast_text(entry_text, parse_mode="HTML")
     print(f"🚀 [TRADE #{trade_number} DIRECTION SENT AT :55s] {dir_sent_time} -> {pair_meta['display']} | {direction}")
 
 
@@ -184,17 +203,17 @@ def run_session(total_trades: int) -> None:
     msg_3 = get_setting("closing_msg_3", "See you in next session!")
 
     # Message 1
-    _broadcast_text(msg_1)
+    _broadcast_text(msg_1, parse_mode="HTML")
     print(f"[{get_now_ist().strftime('%I:%M:%S %p IST')}] ✍️ Closing Message 1 sent. Waiting 2 mins...")
     time.sleep(120)
 
     # Message 2
-    _broadcast_text(msg_2)
+    _broadcast_text(msg_2, parse_mode="HTML")
     print(f"[{get_now_ist().strftime('%I:%M:%S %p IST')}] ✍️ Closing Message 2 sent. Waiting 2 mins...")
     time.sleep(120)
 
     # Message 3
-    _broadcast_text(msg_3)
+    _broadcast_text(msg_3, parse_mode="HTML")
     print(f"[{get_now_ist().strftime('%I:%M:%S %p IST')}] ✍️ Closing Message 3 sent. Waiting 2 mins...")
     time.sleep(120)
 
@@ -214,6 +233,7 @@ def _scheduler_worker() -> None:
     print("⏰ [SCHEDULER RUNNING] Monitoring configured session timings 24/7...")
 
     while not _stop_event.is_set():
+        # 🔥 SESSION ON/OFF CHECK: If bot is turned OFF by admin, do not execute scheduled events
         if not get_setting("is_bot_active", True) or _is_session_running:
             time.sleep(3)
             continue
@@ -242,11 +262,11 @@ def _scheduler_worker() -> None:
                 if 540 <= diff_seconds <= 630:
                     if event_key_10m not in last_10m_sent_events:
                         link_text = (
-                            f"🔔 **SESSION STARTING IN 10 MINUTES!** 🔔\n\n"
+                            f"🔔 <b>SESSION STARTING IN 10 MINUTES!</b> 🔔\n\n"
                             f"Make sure you are logged in and your account is ready.\n\n"
-                            f"🔗 **Broker Login / Registration Link:**\n👉 {login_link}"
+                            f"🔗 <b>Broker Login / Registration Link:</b>\n👉 {login_link}"
                         )
-                        _broadcast_text(link_text)
+                        _broadcast_text(link_text, parse_mode="HTML")
                         last_10m_sent_events.add(event_key_10m)
                         print(f"[{now.strftime('%I:%M:%S %p IST')}] 🔗 Posted 10-Min Login Link for {s_time} session.")
 
